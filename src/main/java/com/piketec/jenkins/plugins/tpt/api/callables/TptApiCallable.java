@@ -89,12 +89,19 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
     if (api != null) {
       return api;
     }
+    logger.info("TPT is not running with the needed settings.");
     // start TPT and try again
-    if (!startTpt(startUpWaitTime)) {
+    api = startTpt(startUpWaitTime);
+    if (api == null) {
       logger.error("Could not start TPT");
       return null;
     }
-    return getApiIfTptIsOpen();
+    try {
+      return waitForTPTToBeReadyAndPrintVersion(api);
+    } catch (RemoteException e) {
+      logger.error("Could not connect to TPT API: " + e.getMessage());
+      return null;
+    }
   }
 
   /**
@@ -102,13 +109,11 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
    * 
    * @return the handle to the api
    */
-  protected @Nullable TptApi getApiIfTptIsOpen() {
+  protected @CheckForNull TptApi getApiIfTptIsOpen() {
     try {
-      return connectToTPT();
+      return waitForTPTToBeReadyAndPrintVersion(getTptApi());
     } catch (RemoteException | NotBoundException e) {
       // That's fine, TPT is not running.
-      TptLogger logger = getLogger();
-      logger.info("TPT is not running with the needed settings.");
       return null;
     }
   }
@@ -118,13 +123,18 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
     return hostName == null ? "localhost" : hostName;
   }
 
-  private TptApi connectToTPT() throws RemoteException, NotBoundException, AccessException {
+  private TptApi getTptApi() throws RemoteException, NotBoundException, AccessException {
+    Registry registry = LocateRegistry.getRegistry(getHostName(), tptPort);
+    return (TptApi)registry.lookup(tptBindingName);
+  }
+
+  private TptApi waitForTPTToBeReadyAndPrintVersion(TptApi remoteApi) throws RemoteException {
     TptLogger logger = getLogger();
-    Registry registry;
-    registry = LocateRegistry.getRegistry(getHostName(), tptPort);
-    TptApi remoteApi = (TptApi)registry.lookup(tptBindingName);
+    if (!waitForTPTToBeReady(remoteApi)) {
+      return null;
+    }
     try {
-      logger.info("Connected to TPT \"" + remoteApi.getTptVersion() + "\"");
+      logger.info("Connected to TPT " + remoteApi.getTptVersion());
     } catch (ApiException e) {
       logger.error(e.getMessage());
       // should not happen
@@ -132,7 +142,31 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
     return remoteApi;
   }
 
-  private boolean startTpt(long startupWaitTime) throws InterruptedException {
+  private boolean waitForTPTToBeReady(TptApi remoteApi) throws RemoteException {
+    TptLogger logger = getLogger();
+    if (remoteApi.isReady()) {
+      return true;
+    }
+    logger.info("Waiting for TPT to become ready...");
+    long endTime = System.currentTimeMillis() + 600000; // wait max. 10min
+    while (!remoteApi.isReady()) {
+      if (System.currentTimeMillis() > endTime) {
+        logger.error("Timeout: TPT API did not become ready within 10 minutes.");
+        return false;
+      }
+      try {
+        Thread.sleep(100);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        logger.error("Interrupted while waiting for TPT to become ready.");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @CheckForNull
+  private TptApi startTpt(long startupWaitTime) throws InterruptedException {
     TptLogger logger = getLogger();
     FilePath exeFile = null;
     for (FilePath f : exePaths) {
@@ -149,26 +183,18 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
     try {
       if (exeFile == null) {
         logger.error("TPT exe not found!");
-        return false;
+        return null;
       } else if (!exeFile.exists()) {
         logger.error("TPT exe not found: " + exeFile.getRemote());
-        return false;
+        return null;
       }
     } catch (IOException e1) {
       logger.error("Could not determine existence of TPT: " + exeFile.getRemote());
-      return false;
+      return null;
     }
     ProcessBuilder builder = null;
     List<String> cmd = new ArrayList<>();
-    if (!SystemUtils.IS_OS_LINUX) {
-      cmd.add(exeFile.getRemote());
-      cmd.add("--apiPort");
-      cmd.add(Integer.toString(tptPort));
-      cmd.add("--apiBindingName");
-      cmd.add(tptBindingName);
-      cmd.addAll(arguments);
-      builder = new ProcessBuilder(cmd);
-    } else {
+    if (SystemUtils.IS_OS_LINUX) {
       cmd.add(exeFile.getRemote());
       cmd.add("--apiPort");
       cmd.add(Integer.toString(tptPort));
@@ -179,9 +205,16 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
       cmd.add("--headless");
       cmd.addAll(arguments);
       builder = new ProcessBuilder(cmd);
-
+    } else {
+      cmd.add(exeFile.getRemote());
+      cmd.add("--apiPort");
+      cmd.add(Integer.toString(tptPort));
+      cmd.add("--apiBindingName");
+      cmd.add(tptBindingName);
+      cmd.addAll(arguments);
+      builder = new ProcessBuilder(cmd);
     }
-    logger.info("Waiting " + startupWaitTime / 1000 + "s for TPT to start.");
+    logger.info("Waiting at most " + startupWaitTime / 1000 + "s for TPT to start.");
     TPTProcessOutputReaderThread outputThread = null;
     TPTProcessOutputReaderThread errorThread = null;
     try {
@@ -189,17 +222,37 @@ public abstract class TptApiCallable<S> extends MasterToSlaveCallable<S, Interru
       outputThread = new TPTProcessOutputReaderThread(p.getInputStream(), false, logger);
       errorThread = new TPTProcessOutputReaderThread(p.getErrorStream(), true, logger);
     } catch (IOException e) {
-      logger.error("Could not start TPT.");
-      return false;
+      logger.error("Could not start TPT. " + e.getLocalizedMessage());
+      return null;
     }
     try {
-      Thread.sleep(startupWaitTime);
+      long waitEndTime = System.currentTimeMillis() + startupWaitTime;
+      TptApi remoteApi = null;
+      while (remoteApi == null) {
+        try {
+          remoteApi = getTptApi();
+        } catch (RemoteException | NotBoundException e) {
+          if (System.currentTimeMillis() > waitEndTime) {
+            logger.error(
+                "Timeout: Could not connect to TPT API within " + (startupWaitTime / 1000) + "s.");
+            return null;
+          }
+          // that's fine, TPT is not yet ready
+          try {
+            Thread.sleep(100);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            logger.error("Interrupted while waiting for TPT to start.");
+            return null;
+          }
+        }
+      }
+      return remoteApi;
     } finally {
       outputThread.stopOutputForwarding();
       errorThread.stopOutputForwarding();
       logger.info("Logging output of TPT process stopped.");
     }
-    return true;
   }
 
   /**

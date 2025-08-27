@@ -1,7 +1,12 @@
 Release History
 ===
+## Version 9.7
+- Plugin now waits for TPT to be ready before using TPAT API
+- Fixed bug that TPT startup wait time was not configurable
+
 ## Version 9.6
 - Fixed support to set the hostname for TPT API via envrionment variable. Can be important for agents running in containers.
+
 ## Version 9.5
 - Plugin now needs at least Jenkins 2.479.3
 - Plugin only works with TPT X-2025.09 if using distributing mode

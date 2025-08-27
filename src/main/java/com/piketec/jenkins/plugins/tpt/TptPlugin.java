@@ -465,7 +465,7 @@ public class TptPlugin extends Builder implements SimpleBuildStep {
           performWithoutWorkerJobs(run, workspace, launcher, listener, env, executionConfiguration);
     }
     if (!result) {
-      throw new AbortException();
+      throw new AbortException("Errors occured during TPT execution, see log for details.");
     }
   }
 
@@ -579,7 +579,7 @@ public class TptPlugin extends Builder implements SimpleBuildStep {
     }
     long expandedTptStartupWaitTime;
     String tptStartUpWaitTime = getTptStartUpWaitTime();
-    if (tptStartUpWaitTime.isEmpty()) {
+    if (!tptStartUpWaitTime.isEmpty()) {
       try {
         expandedTptStartupWaitTime =
             Integer.parseInt(environment.expand(tptStartUpWaitTime)) * 1000;

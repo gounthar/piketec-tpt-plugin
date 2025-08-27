@@ -215,7 +215,7 @@ public class TptPluginSlave extends Builder implements SimpleBuildStep {
     WorkLoad workloadToDo = WorkLoad.pollWorkload(jobName);
     if (workloadToDo == null) {
       logger.error("Nothing todo. No work package for \"" + jobName + "\" enqueued.");
-      throw new AbortException();
+      throw new AbortException("Errors occured during TPT execution, see log for details.");
     }
 
     JenkinsConfiguration unresolvedConfig = workloadToDo.getJenkinsConfig();
